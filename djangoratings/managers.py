@@ -3,6 +3,7 @@ from django.db.models.query import QuerySet
 
 from django.contrib.contenttypes.models import ContentType
 import itertools
+from collections import Counter
 
 class VoteQuerySet(QuerySet):
     def delete(self, *args, **kwargs):
@@ -83,32 +84,47 @@ class SimilarUserManager(Manager):
         return objects
     
     def update_recommendations(self):
-        # TODO: this is mysql only atm
         # TODO: this doesnt handle scores that have multiple values (e.g. 10 points, 5 stars)
         # due to it calling an agreement as score = score. We need to loop each rating instance
         # and express the condition based on the range.
-        from djangoratings.models import Vote
+        from djangoratings.models import Vote, SimilarUser
         from django.db import connection
-        cursor = connection.cursor()
-        cursor.execute('begin')
-        cursor.execute('truncate table %s' % (self.model._meta.db_table,))
-        cursor.execute("""insert into %(t1)s
-          (to_user_id, from_user_id, agrees, disagrees, exclude)
-          select v1.user_id, v2.user_id,
-                 sum(if(v2.score = v1.score, 1, 0)) as agrees,
-                 sum(if(v2.score != v1.score, 1, 0)) as disagrees, 0
-            from %(t2)s as v1
-              inner join %(t2)s as v2
-                on v1.user_id != v2.user_id
-                and v1.object_id = v2.object_id
-                and v1.content_type_id = v2.content_type_id
-            where v1.user_id is not null
-              and v2.user_id is not null
-            group by v1.user_id, v2.user_id
-            having agrees / (disagrees + 0.0001) > 3
-          on duplicate key update agrees = values(agrees), disagrees = values(disagrees);""" % dict(
-            t1=self.model._meta.db_table,
-            t2=Vote._meta.db_table,
-        ))
-        cursor.execute('commit')
-        cursor.close()
+        self.model.objects.get_queryset().delete()
+        votes = Vote.objects.exclude(user_id=None).order_by('object_id', 'content_type_id', 'user_id')
+
+        agreement = Counter()
+        disagreement = Counter()
+
+        vote_iter = votes.iterator()
+        v = next(vote_iter)
+        cur_object = v.object_id
+        cur_content = v.content_type_id
+        cur_user = v.user_id
+        cur_score = v.score
+        for v in vote_iter:
+            if v.object_id == cur_object and v.content_type_id == cur_content:
+                if v.user_id == cur_user:
+                    pass
+                else:
+                    agreement[(cur_user, v.user_id)] += int(v.score == cur_score)
+                    disagreement[(cur_user, v.user_id)] += int(v.score != cur_score)
+            cur_object = v.object_id
+            cur_content = v.content_type_id
+            cur_user = v.user_id
+            cur_score = v.score
+
+        for from_user, to_user in agreement.keys():
+            su = SimilarUser(
+                from_user_id = from_user,
+                to_user_id = to_user,
+                agrees = agreement[(from_user, to_user)],
+                disagrees = disagreement[(from_user, to_user)],
+                exclude=0)
+            su.save()
+            su = SimilarUser(
+                from_user_id = to_user,
+                to_user_id = from_user,
+                agrees = agreement[(to_user, from_user)],
+                disagrees = disagreement[(to_user, from_user)],
+                exclude=0)
+            su.save()
