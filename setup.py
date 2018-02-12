@@ -19,7 +19,7 @@ setup(
     ],
     tests_require=tests_require,
     extras_require={'test': tests_require},
-    test_suite='djangoratings.runtests.runtests',
+    test_suite='tests.runtests.runtests',
     packages=find_packages(),
     include_package_data=True,
     classifiers=[
